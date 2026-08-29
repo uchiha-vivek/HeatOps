@@ -1,4 +1,4 @@
-# HeatOps — Hyperlocal Occupational Thermal Safety & AI Risk Engine
+# HeatOps : Hyperlocal Occupational Thermal Safety & AI Risk Engine
 
 [![ISO 7243:2017](https://img.shields.io/badge/Compliance-ISO%207243%3A2017-orange.svg)](https://www.iso.org/standard/66536.html)
 [![OSHA Heat Standards](https://img.shields.io/badge/OSHA-Occupational%20Heat%20Stress-red.svg)](https://www.osha.gov/heat-exposure)
