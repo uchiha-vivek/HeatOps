@@ -36,7 +36,22 @@ export function exportAnalysisToCsv(options: GenerateCsvOptions) {
   lines.push(`Crew Headcount,${escapeCsvField(analysis.headcount || 30)}`);
   lines.push(`Scheduled Working Hours,${escapeCsvField(analysis.plannedHours)}`);
   lines.push(`Decision Status,${escapeCsvField(analysis.decisionStatus)}`);
-  lines.push(`Hyperlocal UHI Delta (°C),+${escapeCsvField(analysis.uhiDeltaC || 4.2)}°C over city baseline`);
+  lines.push(
+    `Hyperlocal UHI Delta (°C),${
+      analysis.uhiDeltaC == null
+        ? 'unavailable'
+        : `+${escapeCsvField(analysis.uhiDeltaC)}°C over city-polygon mean`
+    }`
+  );
+  // The export is the artifact an auditor cross-checks, so it has to say where
+  // the number came from rather than presenting a constant as a measurement.
+  lines.push(
+    `UHI Delta Source,${
+      analysis.uhiSource === 'fortyguard-heatmap'
+        ? 'FortyGuard /v1/heatmap (500m site polygon vs 15km city polygon)'
+        : 'Built-in per-city calibration table (estimate, not a live measurement)'
+    }`
+  );
   lines.push(`Exceedance Hours (>=HIGH),${escapeCsvField(analysis.exceedanceHours || 0)} Hours`);
   lines.push(`Longest Continuous Persistence,${escapeCsvField(analysis.longestPersistenceHours || 0)} Hours`);
   lines.push(`Safest Shift Window,${escapeCsvField(analysis.safestWindow || '05:30 – 11:00')}`);
@@ -56,7 +71,9 @@ export function exportAnalysisToCsv(options: GenerateCsvOptions) {
   // 2. Executive Decision & Reasoning
   lines.push('EXECUTIVE SAFETY SUMMARY');
   lines.push(`Overall Safety Verdict,${escapeCsvField(analysis.overallVerdict)}`);
-  lines.push(`Primary Risk Trigger,${escapeCsvField(analysis.goNoGoReason)}`);
+  // Labelled as the WBGT-threshold trigger, not "the" risk number - the UHI
+  // delta below is a separate measurement and the two are not comparable.
+  lines.push(`Primary Risk Trigger (vs configured WBGT limit),${escapeCsvField(analysis.goNoGoReason)}`);
   if (analysis.aiReasoning && analysis.aiReasoning.length > 0) {
     analysis.aiReasoning.forEach((reason, index) => {
       lines.push(`HSE Compliance Note ${index + 1},${escapeCsvField(reason)}`);

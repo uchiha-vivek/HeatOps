@@ -3,9 +3,18 @@ import { ChevronDown, ChevronUp, Bot } from 'lucide-react';
 
 interface AiReasoningCardProps {
   reasoning: string[];
+  // Mirrors RiskAnalysisResult.aiEnhanced. Undefined means "not reported"
+  // (older cached analyses), which is treated as AI-authored to avoid
+  // relabelling history; false means Gemini failed and these bullets came from
+  // the deterministic engine.
+  aiEnhanced?: boolean;
 }
 
-export const AiReasoningCard: React.FC<AiReasoningCardProps> = ({ reasoning }) => {
+export const AiReasoningCard: React.FC<AiReasoningCardProps> = ({ reasoning, aiEnhanced }) => {
+  // A "403 PERMISSION_DENIED" banner directly above a card badged "AI
+  // Reasoning" reads as the app lying about its own provenance. When the AI is
+  // down, say so on the card itself.
+  const isDeterministic = aiEnhanced === false;
   const [isOpen, setIsOpen] = useState(true);
 
   return (
@@ -21,8 +30,14 @@ export const AiReasoningCard: React.FC<AiReasoningCardProps> = ({ reasoning }) =
           </div>
           <h4 className="text-xs font-bold text-neutral-900 tracking-tight flex items-center gap-1.5">
             <span>Why this recommendation</span>
-            <span className="text-[10px] text-neutral-500 font-medium font-mono px-1.5 py-0.2 bg-neutral-100 rounded">
-              AI Reasoning
+            <span
+              className={`text-[10px] font-medium font-mono px-1.5 py-0.2 rounded ${
+                isDeterministic
+                  ? 'text-amber-800 bg-amber-100 border border-amber-200'
+                  : 'text-neutral-500 bg-neutral-100'
+              }`}
+            >
+              {isDeterministic ? 'Deterministic — AI unavailable' : 'AI Reasoning'}
             </span>
           </h4>
         </div>

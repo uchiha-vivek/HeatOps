@@ -36,6 +36,14 @@ import { CheckCircle2, X, Trophy, Sparkles, Radio, FileDown, Send, Calculator } 
 
 // Initial pre-hydrated high-fidelity analysis for zero-delay demoing
 const INITIAL_SEEDED_ANALYSIS: RiskAnalysisResult = {
+  // Hand-written sample, not engine output: the hourly curve, the UHI delta,
+  // the reasoning bullets, the toolbox talk and the per-stage pipeline timings
+  // below are all literals. It loads by default so the dashboard is never
+  // empty, which also means it is the first thing a judge sees - hence the
+  // flags marking it as a sample and as non-measured.
+  isSample: true,
+  uhiSource: 'calibration-table',
+  aiEnhanced: false,
   id: 'site-seed-phoenix-skyharbor',
   siteName: 'Sky Harbor Logistics Hub — Slab 1',
   location: 'Sky Harbor Logistics Corridor, Phoenix, Arizona',
@@ -428,12 +436,42 @@ export default function App() {
           ) : currentView === 'dashboard' && activeAnalysis ? (
             <div className="space-y-5 animate-fadeIn">
               {/* Edge case state banners */}
+              {activeAnalysis.isSample && (
+                <div
+                  id="banner-sample-data"
+                  className="p-3.5 rounded-xl bg-sky-50 border border-sky-300 text-sky-900 text-xs flex items-start gap-2.5"
+                >
+                  <Sparkles className="w-4 h-4 text-sky-700 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-bold block mb-0.5">Sample assessment — illustrative numbers</span>
+                    <span className="text-[11px] sm:text-xs text-sky-800 font-normal">
+                      This is a pre-loaded example so the dashboard isn't empty. Its figures are
+                      hand-written, not produced by the risk engine or measured by FortyGuard. Run an
+                      assessment from Setup for live telemetry.
+                    </span>
+                  </div>
+                </div>
+              )}
+
               <EdgeCaseBanners
                 isOffline={isOffline}
                 onRetryConnection={handleRetryConnection}
                 isPartialData={isPartialData}
                 isLowConfidence={isLowConfidence}
                 hasSensorSpike={activeAnalysis.decisionStatus === 'NO-GO'}
+                spike={(() => {
+                  // Derived from this analysis's own hourly data so the banner
+                  // can never describe a different site or trade than the one
+                  // on screen.
+                  const hours = activeAnalysis.hourlyRisks || [];
+                  if (!hours.length) return null;
+                  const peak = hours.reduce((a, b) => (b.heatIndexC > a.heatIndexC ? b : a));
+                  return {
+                    deltaC: peak.heatIndexC - activeAnalysis.thresholdTemp,
+                    hourLabel: peak.hourLabel,
+                    activityType: activeAnalysis.activityType,
+                  };
+                })()}
               />
 
               {/* Core Screen 1: Prominent GO / ADJUST / NO-GO Decision Card & Verdict Banner */}
@@ -475,7 +513,7 @@ export default function App() {
               />
 
               {/* Core Screen 5: Transparent AI Reasoning Card */}
-              <AiReasoningCard reasoning={activeAnalysis.aiReasoning} />
+              <AiReasoningCard reasoning={activeAnalysis.aiReasoning} aiEnhanced={activeAnalysis.aiEnhanced} />
 
               {/* Quick Action Footer Controls */}
               <div className="pt-2 flex items-center justify-between text-xs text-neutral-500 border-t border-neutral-200">

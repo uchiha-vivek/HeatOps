@@ -83,6 +83,18 @@ export interface RiskAnalysisResult {
   
   // FortyGuard & Deterministic Risk Engine Specifications (Optional/Computed)
   uhiDeltaC?: number; // Hyperlocal UHI intensity delta vs city baseline (e.g. +4.2°C)
+  // Whether uhiDeltaC was measured by two FortyGuard /v1/heatmap polygon calls
+  // or read off the hardcoded per-city calibration table. These look identical
+  // on screen otherwise, which is exactly the problem.
+  uhiSource?: 'fortyguard-heatmap' | 'calibration-table';
+  // True only for the pre-seeded demo record. Every number in that record is
+  // handwritten, so it must never be mistaken for an assessment the engine
+  // produced - it is the first thing on screen at load.
+  isSample?: boolean;
+  uhiVsCoolestC?: number | null; // site mean vs the coolest cell in the 15km city polygon
+  cityMinTempC?: number | null;
+  cityMaxTempC?: number | null;
+  fortyGuardDiagnostics?: { site: string; city: string; envParams: string } | null;
   cityBaselineTempC?: number; // City baseline peak temperature
   exceedanceHours?: number; // Total hours at HIGH or EXTREME risk
   longestPersistenceHours?: number; // Longest unbroken run of severe heat

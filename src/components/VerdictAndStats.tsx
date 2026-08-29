@@ -69,7 +69,11 @@ export const VerdictAndStats: React.FC<VerdictAndStatsProps> = ({
     : 'bg-emerald-50 text-emerald-900 border-emerald-200';
 
   const cityName = analysis.location.split(',')[0] || 'City';
-  const uhiDelta = analysis.uhiDeltaC || 4.2;
+  // No `|| 4.2` default here. A missing UHI delta must read as missing, not as
+  // a plausible-looking constant - this line was silently substituting 4.2
+  // whenever the real value was absent or zero.
+  const uhiDelta = analysis.uhiDeltaC;
+  const uhiIsMeasured = analysis.uhiSource === 'fortyguard-heatmap';
   const exceedance = analysis.exceedanceHours || 6;
   const persistence = analysis.longestPersistenceHours || 4;
   const safestWin = analysis.safestWindow || '05:30 – 11:00';
@@ -412,7 +416,28 @@ export const VerdictAndStats: React.FC<VerdictAndStatsProps> = ({
               {analysis.fortyGuardNote}
             </span>
           )}
-          "Your site runs <strong className="text-orange-900 font-bold">{uhiDelta}°C hotter</strong> than the {cityName} average, and stays above the safe threshold for <strong className="text-orange-900 font-bold">{exceedance} straight hours</strong>. Move the {analysis.activityType.toLowerCase()} to <strong className="text-emerald-800 font-bold font-mono bg-white px-1.5 py-0.5 rounded border border-orange-200">{safestWin}</strong> and you keep all <strong className="text-orange-900 font-bold">{crew} workers</strong>."
+          "Your site runs{' '}
+          <strong className="text-orange-900 font-bold">
+            {uhiDelta == null ? 'an unmeasured amount' : `${uhiDelta}°C`} hotter
+          </strong>{' '}
+          than the {cityName} {uhiIsMeasured ? 'city-polygon mean' : 'average'}, and stays above the safe threshold for{' '}
+          <strong className="text-orange-900 font-bold">{exceedance} straight hours</strong>. Move the{' '}
+          {analysis.activityType.toLowerCase()} to{' '}
+          <strong className="text-emerald-800 font-bold font-mono bg-white px-1.5 py-0.5 rounded border border-orange-200">
+            {safestWin}
+          </strong>{' '}
+          and you keep all <strong className="text-orange-900 font-bold">{crew} workers</strong>."
+          {/* Provenance for the headline number. A hardcoded per-city constant
+              and a live two-polygon measurement must not look the same. */}
+          <span className="block mt-1.5 text-[10px] font-mono text-orange-800/70">
+            {uhiIsMeasured
+              ? `UHI delta measured: FortyGuard /v1/heatmap, 500m site polygon vs 15km city polygon${
+                  analysis.uhiVsCoolestC != null
+                    ? ` · +${analysis.uhiVsCoolestC}°C vs the coolest metro cell (${analysis.cityMinTempC}°C)`
+                    : ''
+                }`
+              : 'UHI delta ESTIMATED from the built-in per-city calibration table — not a live FortyGuard measurement.'}
+          </span>
         </div>
 
         {/* 4 FortyGuard Deterministic Metrics Grid */}

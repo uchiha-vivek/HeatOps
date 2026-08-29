@@ -81,7 +81,11 @@ export class FortyGuardError extends Error {}
 // calls run concurrently, so that is the cost of the whole stage, and it leaves
 // room for the Gemini call inside the 60s function limit set in vercel.json.
 // Raising either value means re-checking that sum against maxDuration.
-const HTTP_TIMEOUT_MS = 8000;
+// 8s was too tight in practice: /v1/heatmap submits measured 2-3.4s in
+// isolation, but the site heatmap, the city heatmap and env_params are issued
+// concurrently and a submit under that contention exceeded 8s and aborted -
+// killing a call whose job would have completed fine.
+const HTTP_TIMEOUT_MS = 15000;
 export const POLL_BUDGET_MS = 20000;
 
 async function submitTask(path: string, apiKey: string, payload: any): Promise<string> {
@@ -135,17 +139,21 @@ async function pollTask(
     await new Promise((r) => setTimeout(r, Math.min(intervalMs, remaining)));
   };
 
+  let lastError: unknown = null;
   for (let attempt = 0; Date.now() < deadline; attempt++) {
     let data: any = null;
     try {
       data = await checkStatus(apiKey, activityId);
     } catch (err) {
-      // Activity can be briefly unavailable immediately after submission.
-      if (attempt < 3) {
-        await waitForNextAttempt();
-        continue;
-      }
-      throw err;
+      // A single status check failing is not the job failing - the activity is
+      // briefly unavailable right after submission, and a slow socket aborts on
+      // HTTP_TIMEOUT_MS. Previously anything after the 3rd attempt rethrew,
+      // discarding a job that was still computing normally. The deadline below
+      // is the real bound, so keep retrying until it expires and only then give
+      // up, reporting the last error.
+      lastError = err;
+      await waitForNextAttempt();
+      continue;
     }
     const status = String(data?.status || '').toLowerCase();
     if (status === 'completed' || status === 'succeeded') return data;
@@ -154,7 +162,10 @@ async function pollTask(
     }
     await waitForNextAttempt();
   }
-  throw new FortyGuardError(`task ${activityId} did not complete within ${budgetMs}ms`);
+  throw new FortyGuardError(
+    `task ${activityId} did not complete within ${budgetMs}ms` +
+      (lastError ? ` (last status check error: ${lastError instanceof Error ? lastError.message : String(lastError)})` : '')
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -169,22 +180,31 @@ export interface HeatmapStats {
   raw: any;
 }
 
-export async function fetchHeatmapStats(
+// Submit only. Returns the activity_id so a caller can resolve it later — the
+// 15 km city polygon takes ~90s to compute (measured, Phoenix, granularity
+// 100), which is longer than the whole serverless request budget. Submitting
+// and resolving on a later request is the only way to use that value without
+// blowing maxDuration.
+export async function submitHeatmap(
   apiKey: string,
   ring: LonLat[],
   dateTime: FGDateTime,
   granularity: 60 | 80 | 100 = 100
-): Promise<HeatmapStats> {
-  const payload = {
+): Promise<string> {
+  return submitTask('/v1/heatmap', apiKey, {
     polygon_aoi: polygonFeatureCollection(ring),
     date_time: dateTime,
     granularity,
     analytic_type: 'tcm', // documented, optional, default 'tcm' — explicit for clarity
-  };
-  const activityId = await submitTask('/v1/heatmap', apiKey, payload);
-  const data = await pollTask(apiKey, activityId);
-  // Field casing has been observed inconsistent across responses
-  // (Temperature_stats vs temperature_stats) — check both.
+  });
+}
+
+// Parses a completed /v1/heatmap payload. Field casing is inconsistent across
+// responses — live Phoenix responses return lowercase `temperature_stats` with
+// lowercase `mean`/`minimum`/`maximum`, while the docs show TitleCase. Both are
+// accepted. Note that `n_cells` is NOT present in the live response at all, so
+// it must never be used as a validity test; `mean` being a number is the test.
+export function parseHeatmapStats(data: any): HeatmapStats {
   const statsData = data?.result?.stats_data;
   const stats = statsData?.Temperature_stats ?? statsData?.temperature_stats;
   const nCells = typeof statsData?.n_cells === 'number'
@@ -201,6 +221,29 @@ export async function fetchHeatmapStats(
     nCells,
     raw: data,
   };
+}
+
+// Resolves an already-submitted heatmap activity. Throws FortyGuardError if it
+// has not finished inside budgetMs — the caller decides whether that is fatal.
+export async function resolveHeatmap(
+  apiKey: string,
+  activityId: string,
+  budgetMs: number = POLL_BUDGET_MS
+): Promise<HeatmapStats> {
+  return parseHeatmapStats(await pollTask(apiKey, activityId, { budgetMs }));
+}
+
+// Submit + resolve in one call. Only safe for small polygons: the 500 m site
+// ring completes in ~20s, which already sits at the default budget.
+export async function fetchHeatmapStats(
+  apiKey: string,
+  ring: LonLat[],
+  dateTime: FGDateTime,
+  granularity: 60 | 80 | 100 = 100,
+  budgetMs: number = POLL_BUDGET_MS
+): Promise<HeatmapStats> {
+  const activityId = await submitHeatmap(apiKey, ring, dateTime, granularity);
+  return resolveHeatmap(apiKey, activityId, budgetMs);
 }
 
 // ---------------------------------------------------------------------------

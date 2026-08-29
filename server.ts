@@ -4,11 +4,14 @@ import { GoogleGenAI, Type } from '@google/genai';
 import {
   siteBox,
   fetchHeatmapStats,
+  submitHeatmap,
+  resolveHeatmap,
   fetchEnvParams,
   submitHeatIntelligenceReport,
   checkStatus,
   celsiusToFahrenheit,
   type FGDateTime,
+  type HeatmapStats,
 } from './lib/fortyguard.js';
 
 const app = express();
@@ -19,16 +22,59 @@ const FORTYGUARD_API_KEY = process.env.FORTYGUARD_API_KEY || '';
 
 interface FortyGuardTelemetry {
   source: 'fortyguard-live';
-  // null when /v1/heatmap returns no cells for the AOI. env_params readings
-  // below can still be valid in that case, so this is not an all-or-nothing
-  // signal - callers must fall back to Open-Meteo for temperature only.
+  // null when /v1/heatmap returns no usable Temperature_stats for the AOI.
+  // env_params readings below can still be valid in that case, so this is not
+  // an all-or-nothing signal - callers fall back to Open-Meteo for temperature
+  // only.
   siteTempC: number | null;
   cityTempC: number | null;
+  // Site mean minus city-polygon mean. Both polygons are concentric and both
+  // sit inside the same urban core, so this is genuinely small (measured
+  // +0.3 C at Sky Harbor) - it is NOT the "site vs the rest of the metro"
+  // number the pitch implies. See uhiVsCoolestC for that.
   uhiDeltaC: number | null;
+  // Site mean minus the COOLEST cell in the 15 km city polygon. This is the
+  // defensible hyperlocal number: how much hotter this site runs than the
+  // coolest part of the surrounding metro, from the same single API response.
+  uhiVsCoolestC: number | null;
+  cityMinTempC: number | null;
+  cityMaxTempC: number | null;
   humidity: number | null;
   heatIndexC: number | null;
   solarWm2: number | null;
   aqi: number | null;
+  // Exactly what happened on each call, so a failure is visible in the API
+  // response instead of only in a serverless log nobody reads mid-demo.
+  diagnostics: {
+    site: string;
+    city: string;
+    envParams: string;
+  };
+}
+
+// The 15 km city polygon takes 90-240s to compute (measured against the live
+// API at Phoenix, granularity 100: 90s at 12:00, 237s at 05:00 - the latency
+// is load-dependent and NOT stable), and the 5 km one ~50s. All of those
+// exceed what a single 60s serverless invocation can wait for on top of
+// geocoding, Open-Meteo and Gemini. So the city baseline is computed ACROSS
+// requests: the first analysis submits the job and caches the activity_id,
+// later requests resolve it. Warm this before a demo with
+// `node scripts/warm-city-baseline.mjs`.
+//
+// This is in-memory, so on Vercel it is per-instance and does not survive a
+// cold start. That is acceptable for a demo but means the first request to a
+// cold instance shows uhiSource 'pending' rather than a live delta.
+interface CityBaselineEntry {
+  activityId: string;
+  submittedAt: number;
+  stats?: HeatmapStats;
+}
+const cityBaselineCache = new Map<string, CityBaselineEntry>();
+const CITY_BASELINE_TTL_MS = 60 * 60 * 1000; // one hour: the requested hour bucket
+
+function cityBaselineKey(lat: number, lon: number, dateTime: FGDateTime) {
+  // ~1 km rounding: two sites in the same metro share a city baseline.
+  return `${lat.toFixed(2)}_${lon.toFixed(2)}_${dateTime.start_date}_${dateTime.start_time}`;
 }
 
 // Real hyperlocal UHI delta + environmental readings from the FortyGuard
@@ -58,75 +104,151 @@ function isWithinFortyGuardCoverage(lat: number, lon: number): boolean {
   return lat >= 24 && lat <= 50 && lon >= -125 && lon <= -66;
 }
 
-async function fetchFortyGuardTelemetry(lat: number, lon: number, liveHourlyWeather: any) {
+async function fetchFortyGuardTelemetry(
+  lat: number,
+  lon: number,
+  liveHourlyWeather: any
+): Promise<FortyGuardTelemetry | null> {
   if (!FORTYGUARD_API_KEY) return null;
   if (!isWithinFortyGuardCoverage(lat, lon)) return null;
 
-  try {
-    const now = new Date();
-    const currentUtcHour = now.getUTCHours();
-    const dateTime: FGDateTime = {
-      start_date: now.toISOString().slice(0, 10),
-      start_time: `${String(currentUtcHour).padStart(2, '0')}:00`,
-      filter_type: 1,
-    };
+  // The hour to request, in the SITE's local time, not the server's UTC hour.
+  // The previous code sent `now.getUTCHours()` with the UTC date, which asks
+  // FortyGuard for the wrong hour at every US site and, when the server runs
+  // east of UTC late in the day, asks for a date that has not happened yet in
+  // Phoenix. Longitude gives a good-enough local offset without a tz library.
+  const now = new Date();
+  const offsetHours = Math.round(lon / 15);
+  const siteLocal = new Date(now.getTime() + offsetHours * 3600_000);
+  const dateTime: FGDateTime = {
+    start_date: siteLocal.toISOString().slice(0, 10),
+    start_time: `${String(siteLocal.getUTCHours()).padStart(2, '0')}:00`,
+    filter_type: 1,
+  };
 
-    const siteRing = siteBox(lat, lon, 500);
-    const cityRing = siteBox(lat, lon, 15000);
+  const siteRing = siteBox(lat, lon, 500);
+  const cityRing = siteBox(lat, lon, 15000);
 
-    // Current-hour temperature to feed env_params (it's a required input,
-    // not something FortyGuard measures). Falls back to a seasonal default
-    // if Open-Meteo's current-hour reading isn't available.
-    const currentTempC =
-      liveHourlyWeather?.temperature_2m?.[currentUtcHour] !== undefined
-        ? liveHourlyWeather.temperature_2m[currentUtcHour]
-        : 32;
+  const currentTempC =
+    liveHourlyWeather?.temperature_2m?.[siteLocal.getUTCHours()] !== undefined
+      ? liveHourlyWeather.temperature_2m[siteLocal.getUTCHours()]
+      : 32;
 
-    const [siteStats, cityStats, envParams] = await Promise.all([
-      fetchHeatmapStats(FORTYGUARD_API_KEY, siteRing, dateTime),
-      fetchHeatmapStats(FORTYGUARD_API_KEY, cityRing, dateTime),
-      fetchEnvParams(FORTYGUARD_API_KEY, lat, lon, currentTempC, dateTime, [
-        'heat_index_celsius',
-        'relative_humidity_percent',
-        'air_quality:idx',
-      ]).catch((err) => {
-        console.warn('FortyGuard env_params call failed (non-fatal):', err instanceof Error ? err.message : err);
-        return null;
-      }),
-    ]);
+  const describe = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-    // /v1/heatmap regularly completes with n_cells: 0 (no surface cells for the
-    // AOI). Previously that discarded the whole telemetry object - including
-    // the env_params readings we had already paid credits for - and silently
-    // dropped the request to Open-Meteo. Keep whatever we actually got: the
-    // UHI delta degrades to null, the environmental readings survive.
-    if (siteStats.mean === null) {
-      console.warn(
-        `FortyGuard /v1/heatmap returned no Temperature_stats (n_cells: ${siteStats.nCells}). ` +
-        'UHI delta unavailable for this site; env_params readings are still used if present.'
-      );
-      if (!envParams || (envParams.heatIndexC === null && envParams.humidity === null)) {
-        return null; // nothing usable from either endpoint
-      }
-    }
+  // Each call gets its OWN catch. Previously all three sat in a bare
+  // Promise.all, so a single rejection - in practice the city polygon blowing
+  // its poll budget - discarded the site reading and the env_params reading
+  // that had ALREADY been paid for in credits, and dropped the whole request
+  // to Open-Meteo with no indication why. Partial success is now kept.
+  const [siteStats, envParams] = await Promise.all([
+    // 500 m ring measures ~20s to complete, which sat exactly on the old 20s
+    // budget - a coin flip. 32s gives it real headroom inside maxDuration 60.
+    fetchHeatmapStats(FORTYGUARD_API_KEY, siteRing, dateTime, 100, 32000)
+      .then((stats) => ({ ok: true as const, stats }))
+      .catch((err) => ({ ok: false as const, err: describe(err) })),
+    fetchEnvParams(FORTYGUARD_API_KEY, lat, lon, currentTempC, dateTime, [
+      'heat_index_celsius',
+      'relative_humidity_percent',
+      'air_quality:idx',
+    ])
+      .then((reading) => ({ ok: true as const, reading }))
+      .catch((err) => ({ ok: false as const, err: describe(err) })),
+  ]);
 
-    const uhiDeltaC = siteStats.mean !== null && cityStats.mean !== null
-      ? Math.round((siteStats.mean - cityStats.mean) * 10) / 10
-      : null;
+  const cityStats = await resolveCityBaseline(lat, lon, cityRing, dateTime).catch((err) => ({
+    stats: null,
+    note: describe(err),
+  }));
 
-    return {
-      source: 'fortyguard-live' as const,
-      siteTempC: siteStats.mean !== null ? Math.round(siteStats.mean * 10) / 10 : null,
-      cityTempC: cityStats.mean !== null ? Math.round(cityStats.mean * 10) / 10 : null,
-      uhiDeltaC,
-      humidity: envParams?.humidity ?? null,
-      heatIndexC: envParams?.heatIndexC ?? null,
-      solarWm2: envParams?.solarGhiWm2 ?? null,
-      aqi: envParams?.aqi ?? null,
-    };
-  } catch (err) {
-    console.warn('FortyGuard live telemetry unavailable, falling back to Open-Meteo/fixtures:', err instanceof Error ? err.message : err);
+  const site = siteStats.ok ? siteStats.stats : null;
+  const env = envParams.ok ? envParams.reading : null;
+  const city = cityStats.stats;
+
+  const diagnostics = {
+    site: site
+      ? `ok: mean ${site.mean}C`
+      : `failed: ${(siteStats as any).err}`,
+    city: city ? `ok: mean ${city.mean}C` : `unavailable: ${cityStats.note}`,
+    envParams: env ? 'ok' : `failed: ${(envParams as any).err}`,
+  };
+
+  if (!site && !env) {
+    console.warn('FortyGuard: nothing usable from either endpoint.', diagnostics);
     return null;
+  }
+
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+
+  return {
+    source: 'fortyguard-live',
+    siteTempC: site?.mean != null ? round1(site.mean) : null,
+    cityTempC: city?.mean != null ? round1(city.mean) : null,
+    uhiDeltaC:
+      site?.mean != null && city?.mean != null ? round1(site.mean - city.mean) : null,
+    uhiVsCoolestC:
+      site?.mean != null && city?.min != null ? round1(site.mean - city.min) : null,
+    cityMinTempC: city?.min != null ? round1(city.min) : null,
+    cityMaxTempC: city?.max != null ? round1(city.max) : null,
+    humidity: env?.humidity ?? null,
+    heatIndexC: env?.heatIndexC ?? null,
+    solarWm2: env?.solarGhiWm2 ?? null,
+    aqi: env?.aqi ?? null,
+    diagnostics,
+  };
+}
+
+// Resolves the 15 km city baseline across requests rather than inside one.
+// First call submits and returns "pending"; a later call (or the warm-up
+// script) resolves the same activity_id, so no credits are re-spent.
+async function resolveCityBaseline(
+  lat: number,
+  lon: number,
+  cityRing: ReturnType<typeof siteBox>,
+  dateTime: FGDateTime
+): Promise<{ stats: HeatmapStats | null; note: string }> {
+  const key = cityBaselineKey(lat, lon, dateTime);
+  const cached = cityBaselineCache.get(key);
+
+  if (cached && Date.now() - cached.submittedAt < CITY_BASELINE_TTL_MS) {
+    if (cached.stats) return { stats: cached.stats, note: 'cached' };
+    // Job already submitted on an earlier request - give it a short window to
+    // land now. It usually has: submission to completion measures ~90s.
+    try {
+      const stats = await resolveHeatmap(FORTYGUARD_API_KEY, cached.activityId, 12000);
+      cached.stats = stats;
+      return { stats, note: 'resolved from a previously submitted job' };
+    } catch (err) {
+      // Distinguish "not finished yet" from "the job actually failed".
+      // Collapsing both into "still computing" hides a dead job behind a
+      // message that says to keep waiting - which is how a demo silently runs
+      // on the estimate forever.
+      const message = err instanceof Error ? err.message : String(err);
+      const ageS = Math.round((Date.now() - cached.submittedAt) / 1000);
+      const stillRunning = /did not complete within/.test(message);
+      if (!stillRunning) {
+        // Terminal failure: drop the cache entry so the next request submits a
+        // fresh job instead of re-polling a corpse for the whole TTL.
+        cityBaselineCache.delete(key);
+      }
+      console.warn(`FortyGuard city polygon ${cached.activityId} (${ageS}s old): ${message}`);
+      return {
+        stats: null,
+        note: stillRunning
+          ? `city polygon still computing (activity ${cached.activityId}, submitted ${ageS}s ago)`
+          : `city polygon failed (activity ${cached.activityId}, ${ageS}s old): ${message}`,
+      };
+    }
+  }
+
+  // No job in flight for this hour: submit one for the NEXT request to use,
+  // and report this request as pending rather than blocking on ~90s.
+  try {
+    const activityId = await submitHeatmap(FORTYGUARD_API_KEY, cityRing, dateTime, 100);
+    cityBaselineCache.set(key, { activityId, submittedAt: Date.now() });
+    return { stats: null, note: 'city polygon submitted; ready in ~90s, re-run to pick it up' };
+  } catch (err) {
+    return { stats: null, note: `submit failed: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
@@ -293,10 +415,19 @@ function buildOccupationalHeatProfile(
   // Preferred: real FortyGuard heat-intelligence delta (500m site vs 15km city polygon).
   // Fallback: fixture calibration table, used only when no API key is configured or
   // the live call fails/times out — this is the "Graceful High-Fidelity Fallback".
+  // WHERE THIS NUMBER COMES FROM must travel with the number itself. The
+  // calibration table below is a hardcoded per-city constant, and it was
+  // previously indistinguishable on screen from a live FortyGuard measurement
+  // - the UI rendered "your site runs +4.5C hotter" identically whether that
+  // 4.5 came from two polygon calls or from this if/else chain. On a
+  // FortyGuard-sponsored submission that is the single most dangerous thing in
+  // the app, so uhiSource now ships with every response and the UI labels it.
   let uhiDeltaC = 3.2;
+  let uhiSource: 'fortyguard-heatmap' | 'calibration-table' = 'calibration-table';
   const locLower = location.toLowerCase();
   if (fortyGuardTelemetry?.uhiDeltaC !== null && fortyGuardTelemetry?.uhiDeltaC !== undefined) {
     uhiDeltaC = fortyGuardTelemetry.uhiDeltaC;
+    uhiSource = 'fortyguard-heatmap';
   } else if (locLower.includes('phoenix') || locLower.includes('sky harbor')) uhiDeltaC = 4.5;
   else if (locLower.includes('las vegas') || locLower.includes('vegas')) uhiDeltaC = 4.2;
   else if (locLower.includes('houston') || locLower.includes('ship channel')) uhiDeltaC = 3.8;
@@ -498,10 +629,14 @@ function buildOccupationalHeatProfile(
 
     if (decisionStatus === 'NO-GO') {
       overallVerdict = `CRITICAL NO-GO: Stop heavy outdoor work between ${startPause} and ${endPause}. Thermal strain exceeds survivability thresholds.`;
-      goNoGoReason = `Site microclimate exceeds WBGT safe limit by +${(Math.max(...highRiskHours.map((d) => d.heatIndexC)) - thresholdTemp).toFixed(1)}°C with ${longestPersistenceHours} straight hours of extreme thermal load.`;
+      // This is exceedance above the CONFIGURED WBGT LIMIT - a different
+      // quantity from the site-vs-city UHI delta, which is also rendered as
+      // "+N.N°C" elsewhere in the same report. Naming the reference explicitly
+      // is what stops the two reading as a contradiction.
+      goNoGoReason = `Peak heat index exceeds the configured ${thresholdTemp}°C WBGT limit by +${(Math.max(...highRiskHours.map((d) => d.heatIndexC)) - thresholdTemp).toFixed(1)}°C, with ${longestPersistenceHours} straight hours of extreme thermal load.`;
     } else if (decisionStatus === 'ADJUST') {
       overallVerdict = `ADJUST SHIFT WINDOW: Move ${activityType.toLowerCase()} to ${safestWindow} to preserve all ${headcount} workers and avoid ${exceedanceHours} dangerous hours.`;
-      goNoGoReason = `Hyperlocal site thermal load runs +${uhiDeltaC}°C hotter than city baseline. Shift adjustment ensures zero thermal casualty risk.`;
+      goNoGoReason = `Hyperlocal site thermal load runs +${uhiDeltaC}°C hotter than the city-polygon baseline. Shift adjustment ensures zero thermal casualty risk.`;
     }
   }
 
@@ -619,6 +754,11 @@ function buildOccupationalHeatProfile(
     
     // FortyGuard Spec Fields
     uhiDeltaC,
+    uhiSource,
+    uhiVsCoolestC: fortyGuardTelemetry?.uhiVsCoolestC ?? null,
+    cityMinTempC: fortyGuardTelemetry?.cityMinTempC ?? null,
+    cityMaxTempC: fortyGuardTelemetry?.cityMaxTempC ?? null,
+    fortyGuardDiagnostics: fortyGuardTelemetry?.diagnostics ?? null,
     cityBaselineTempC,
     exceedanceHours,
     longestPersistenceHours,
@@ -699,7 +839,13 @@ app.post('/api/analyze-heat', async (req, res) => {
   // Build deterministic cache key
   const cacheKey = `${location.trim().toLowerCase()}_${activityType}_${start}_${end}_${thresh}_${crewCount}_${isAcclimatized}_${hasShade}_${hasWater}`;
   const cached = heatAnalysisCache.get(cacheKey);
-  if (cached && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
+  // Don't serve a cached analysis whose UHI delta came from the calibration
+  // table. The 15 km city polygon resolves across requests (~90s), so the
+  // whole point of a re-run is to pick up the real measurement once it lands -
+  // and a 15-minute cache would otherwise pin the estimate in place for the
+  // entire demo.
+  const cachedIsMeasured = cached?.data?.uhiSource === 'fortyguard-heatmap';
+  if (cached && cachedIsMeasured && (Date.now() - cached.timestamp < CACHE_TTL_MS)) {
     return res.json({
       ...cached.data,
       isCached: true,

@@ -7,6 +7,15 @@ interface EdgeCaseBannersProps {
   isPartialData: boolean;
   isLowConfidence: boolean;
   hasSensorSpike?: boolean;
+  // Real values for the spike banner. Previously the banner rendered a fixed
+  // string ("+4.2°C at 12:30 PM (Roofing asphalt heat reflection)") regardless
+  // of the site or trade actually selected, so a concrete-pouring assessment
+  // displayed roofing text.
+  spike?: {
+    deltaC: number;
+    hourLabel: string;
+    activityType: string;
+  } | null;
 }
 
 export const EdgeCaseBanners: React.FC<EdgeCaseBannersProps> = ({
@@ -15,6 +24,7 @@ export const EdgeCaseBanners: React.FC<EdgeCaseBannersProps> = ({
   isPartialData,
   isLowConfidence,
   hasSensorSpike = false,
+  spike = null,
 }) => {
   return (
     <div className="space-y-2">
@@ -71,7 +81,7 @@ export const EdgeCaseBanners: React.FC<EdgeCaseBannersProps> = ({
       )}
 
       {/* 4. Extreme Sensor Spike Flag */}
-      {hasSensorSpike && (
+      {hasSensorSpike && spike && (
         <div id="banner-sensor-spike" className="p-3 rounded-xl bg-red-100 border border-red-300 text-red-900 text-xs flex items-center gap-2.5">
           <AlertOctagon className="w-4 h-4 text-red-700 shrink-0" />
           <div>
@@ -79,7 +89,9 @@ export const EdgeCaseBanners: React.FC<EdgeCaseBannersProps> = ({
               Extreme Microclimate Thermal Spike Flagged
             </span>
             <p className="text-[11px] mt-0.5">
-              Local ambient sensor registered a +4.2°C thermal surge at 12:30 PM (Roofing asphalt heat reflection). Unaveraged for safety transparency.
+              Peak heat index runs +{spike.deltaC.toFixed(1)}°C over the configured limit at{' '}
+              {spike.hourLabel} under {spike.activityType.toLowerCase()} metabolic load. Unaveraged for
+              safety transparency.
             </p>
           </div>
         </div>
