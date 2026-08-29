@@ -269,7 +269,21 @@ if (process.env.GEMINI_API_KEY) {
 // a serverless invocation with a hard ceiling. Cap it so a slow model response
 // degrades to the deterministic verdict instead of taking the whole request
 // down with it.
-const GEMINI_TIMEOUT_MS = 12000;
+//
+// A fixed cap can't do that on its own. The deterministic stages ahead of it
+// (geocode + the 32s FortyGuard ring) measure ~45s on a cold Phoenix run, so a
+// flat 20s would push the worst case past maxDuration 60 and the caller would
+// get a platform timeout instead of the fallback verdict this cap exists to
+// produce. The budget is therefore what's LEFT of the invocation, not a
+// constant: whatever remains up to GEMINI_MAX_MS, and we skip the call outright
+// below GEMINI_MIN_MS rather than spend the tail on a request that can't land.
+const REQUEST_BUDGET_MS = 55000; // maxDuration 60 in vercel.json, less headroom
+const GEMINI_MAX_MS = 20000; // gemini-3.6-flash returns this prompt in ~11s
+const GEMINI_MIN_MS = 6000; // below this the call reliably aborts unfinished
+
+function geminiBudgetMs(requestStart: number): number {
+  return Math.min(GEMINI_MAX_MS, REQUEST_BUDGET_MS - (Date.now() - requestStart));
+}
 
 // Turns a Gemini failure into something a supervisor reading the dashboard can
 // act on. The distinction that matters most in practice is a project-level
@@ -291,6 +305,19 @@ function describeAiFailure(err: unknown): string {
   }
   if (status === 401 || /API_KEY_INVALID|API key not valid/i.test(message)) {
     return 'AI narrative unavailable: the configured Gemini API key was rejected. Verdict below is from the deterministic ISO 7243 engine.';
+  }
+  // A retired model 404s with the replacement named in the message. That read
+  // as a generic failure before, which is how a dead model hid behind a
+  // plausible-looking deterministic verdict instead of announcing itself.
+  if (status === 404 || /NOT_FOUND|no longer available/i.test(message)) {
+    // The SDK puts the whole JSON error body in .message. Google names the
+    // replacement model in there, so lift just that sentence out rather than
+    // pasting a blob of JSON onto a heat safety dashboard.
+    const detail = message.match(/"message":\s*"([^"]+)"/)?.[1] ?? message;
+    return (
+      `AI narrative unavailable: Gemini rejected the configured model (404). ${detail.slice(0, 240)} ` +
+      'Verdict below is from the deterministic ISO 7243 engine.'
+    );
   }
   // AbortSignal.timeout() surfaces as "aborted due to timeout", not "timed out".
   if (/timed out|timeout|abort/i.test(message) || (err as any)?.name === 'TimeoutError') {
@@ -819,6 +846,7 @@ app.get('/api/geocode', async (req, res) => {
 
 // Primary Real Meteorological & Gemini-Powered Risk Analysis API
 app.post('/api/analyze-heat', async (req, res) => {
+  const requestStart = Date.now();
   const { location, activityType, startTime, endTime, thresholdTemp, headcount, acclimatized, shadeAvailable, waterAvailable } = req.body || {};
 
   if (!location || !activityType) {
@@ -909,10 +937,19 @@ app.post('/api/analyze-heat', async (req, res) => {
   let aiEnhanced = false;
   let aiNote: string | undefined;
 
-  // 4. Enhance with Gemini 2.5/3.7 Flash if AI is configured
+  // 4. Enhance with Gemini 3.6 Flash if AI is configured
+  const geminiBudget = geminiBudgetMs(requestStart);
   if (!ai) {
     aiNote =
       'AI narrative unavailable: no GEMINI_API_KEY is configured on this server. ' +
+      'Verdict below is from the deterministic ISO 7243 engine.';
+  } else if (geminiBudget < GEMINI_MIN_MS) {
+    // The upstream readings ate the invocation. Returning the deterministic
+    // verdict now beats starting a call that would abort mid-flight and land
+    // us here anyway, several seconds closer to a platform timeout.
+    aiNote =
+      `AI narrative skipped: the weather readings used ${Math.round((Date.now() - requestStart) / 1000)}s ` +
+      `of the ${REQUEST_BUDGET_MS / 1000}s request budget, leaving too little for the model. ` +
       'Verdict below is from the deterministic ISO 7243 engine.';
   } else {
     try {
@@ -937,12 +974,12 @@ EVALUATE AND RETURN JSON STRICTLY WITH:
 7. hydratedBreaksFrequency: string (e.g. "Every 20 mins in shaded shelter")`;
 
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.6-flash',
         contents: prompt,
         config: {
           // Actually cancels the in-flight request rather than just abandoning
           // it, so a slow model doesn't hold the serverless invocation open.
-          abortSignal: AbortSignal.timeout(GEMINI_TIMEOUT_MS),
+          abortSignal: AbortSignal.timeout(geminiBudget),
           responseMimeType: 'application/json',
           responseSchema: {
             type: Type.OBJECT,
