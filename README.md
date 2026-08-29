@@ -51,7 +51,7 @@ It fuses **hyperlocal thermal microclimate data** (via FortyGuard API and real-w
 
 ### 2. Installation
 ```bash
-git clone https://github.com/your-username/heatops.git
+git clone https://github.com/Arisha004/HeatOps.git
 cd heatops
 npm install
 ```
@@ -67,7 +67,7 @@ Configure your `.env` file:
 # Google Gemini API Key (for server-side AI reasoning & toolbox briefings)
 GEMINI_API_KEY=your_gemini_api_key_here
 
-# FortyGuard API Key (Optional — fallback meteorological telemetry is automatic)
+# FortyGuard API Key 
 FORTYGUARD_API_KEY=your_fortyguard_key_here
 ```
 
@@ -126,6 +126,7 @@ heatops/
 │       ├── supabase.ts       # Supabase client, auth sessions, and cloud sync
 │       └── pdfReport.ts      # jsPDF export for printable OSHA / ISO safety audit sheets
 ```
+---
 ## AI Agent Pipeline
 
 ![HeatOps agent pipeline](heatops_agent_pipeline.gif)
