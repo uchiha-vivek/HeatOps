@@ -10,7 +10,7 @@
 
 ---
 
-## 🏗️ Overview
+##  Overview
 
 **HeatOps** is an enterprise-grade occupational heat safety intelligence platform designed for construction supervisors, HSE directors, infrastructure contractors, and agricultural operations. 
 
@@ -24,7 +24,7 @@ It fuses **hyperlocal thermal microclimate data** (via FortyGuard API and real-w
 
 ---
 
-## ⚡ Key Features
+## Key Features
 
 - **Hyperlocal Heat Modeling**: Urban Heat Island (UHI) delta analysis comparing site-level microclimates with city baselines.
 - **Deterministic Risk Engine**:
@@ -43,7 +43,7 @@ It fuses **hyperlocal thermal microclimate data** (via FortyGuard API and real-w
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### 1. Prerequisites
 - Node.js 18+ or 20+
@@ -89,7 +89,7 @@ npm start
 
 ---
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 heatops/
@@ -126,10 +126,25 @@ heatops/
 │       ├── supabase.ts       # Supabase client, auth sessions, and cloud sync
 │       └── pdfReport.ts      # jsPDF export for printable OSHA / ISO safety audit sheets
 ```
+## AI Agent Pipeline
 
+![HeatOps agent pipeline](heatops_agent_pipeline.gif)
+
+HeatOps runs a deterministic 6-stage agent pipeline — zero hallucinated math, full regulatory traceability. Only Stages 1 and 6 touch an LLM (Gemini); the safety-critical math in between is fully deterministic, auditable, and reproducible.
+
+| Stage | Agent | What it does |
+|---|---|---|
+| 01 | **Intake** (LLM + Geo Parser) | Validates shift parameters and crew headcount; builds a 500m bounding polygon around the site coordinates. |
+| 02 | **Fetch** (Async Gateway) | Pulls concurrent FortyGuard telemetry — air temp, solar irradiance, humidity, wind vectors — with exponential backoff and cache dedup. |
+| 03 | **Risk Engine** (Pure Math) | Runs the Australian BoM simplified WBGT formula, adjusted for solar flux, wind cooling, and metabolic load. |
+| 04 | **Mitigation** (ACGIH/NIOSH Mapping) | Outputs the Go / Adjust / No-Go call, safe shift windows, work-rest cycles, and hydration quotas. |
+| 05 | **Verification** (Safety Audit) | Cross-checks every recommendation against ISO 7243:2017 and OSHA/NIOSH criteria before it reaches a supervisor. |
+| 06 | **Briefing** (Audio Synthesizer) | Converts the verified plan into a 120-word spoken toolbox talk, broadcast with 1-click synthetic speech. |
+
+*Built for the FortyGuard Hyperlocal Heat Hackathon '26 — AI Agents track.*
 ---
 
-## 🧪 Testing & Verification
+## Testing & Verification
 
 - **Lint Check**: `npm run lint`
 - **TypeScript Build**: `npm run build`
@@ -139,5 +154,5 @@ heatops/
 
 ---
 
-## 🛡️ License & Compliance
+##  License & Compliance
 Built in compliance with **ISO 7243:2017** (*Hot environments — Estimation of heat stress on working man*), **ACGIH TLV** guidelines, and **NIOSH Criteria 2016-106** and **OSHA heat illness prevention guidance**.
