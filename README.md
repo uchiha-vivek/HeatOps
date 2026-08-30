@@ -15,8 +15,7 @@
 
 ---
 
-
-##  Overview
+## Overview
 
 **HeatOps** is an enterprise-grade occupational heat safety intelligence platform designed for construction supervisors, HSE directors, infrastructure contractors, and agricultural operations. 
 
@@ -49,7 +48,7 @@ It fuses **hyperlocal thermal microclimate data** (via FortyGuard API and real-w
 
 ---
 
-##  Quick Start
+## Quick Start
 
 ### 1. Prerequisites
 - Node.js 18+ or 20+
